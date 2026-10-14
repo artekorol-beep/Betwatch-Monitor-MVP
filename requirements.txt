@@ -1,4 +1,1 @@
-streamlit>=1.35
-pandas>=2.0
-numpy>=1.24
-plotly>=5.20
+streamlit>=1.35\npandas>=2.0\nplotly>=5.20\n

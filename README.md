@@ -1,24 +1,16 @@
-# Betwatch Monitor MVP
+# Betwatch Monitor — updated MVP
 
-## Запуск локально
-1. Установите Python 3.10+.
-2. Распакуйте архив.
-3. Поместите `betwatch_all_markets_session_3.csv` рядом с `app.py`, либо загрузите CSV через боковую панель.
-4. Установите зависимости:
-   `pip install -r requirements.txt`
-5. Запустите:
-   `streamlit run app.py`
+- Maximum odds default: 100.
+- SUSPENDED rows can be shown and are marked separately.
+- Extreme jumps are marked when the ratio between adjacent odds reaches the configured threshold (default 5x).
+- Signals sorted by absolute percentage change.
+- Signal CSV export.
+- Historical CSV analysis only; live API polling is not connected.
 
-## Google Colab
-Это Streamlit-приложение удобнее запускать локально или на сервере. В Colab можно использовать ноутбук MVP для исторического анализа; Streamlit-панель в Colab требует отдельного способа публикации порта/туннеля.
+Run locally:
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-## Текущие возможности
-- Загрузка CSV из файла или интерфейса
-- Контроль качества и дубликатов
-- Фильтры по матчам и рынкам
-- Графики коэффициентов
-- Кандидаты на сигналы при заданном пороге
-- Экспорт CSV
-
-## Live API
-Live-опрос намеренно выключен. В загруженных CSV не содержится API endpoint, формат запроса и схема авторизации. Не угадывайте endpoint. Перенесите HTTP-запрос из исходного сборщика и храните секреты в переменных окружения/Colab Secrets.
+For Streamlit Cloud, replace `app.py` and `requirements.txt` in the GitHub repository and commit changes. Keep API keys out of the public repository.
