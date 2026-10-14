@@ -1,16 +1,12 @@
-# Betwatch Monitor — updated MVP
+# Betwatch Monitor — Top Changes update
 
-- Maximum odds default: 100.
-- SUSPENDED rows can be shown and are marked separately.
-- Extreme jumps are marked when the ratio between adjacent odds reaches the configured threshold (default 5x).
-- Signals sorted by absolute percentage change.
-- Signal CSV export.
-- Historical CSV analysis only; live API polling is not connected.
+- Рейтинг топ-10/20/50 изменений коэффициентов.
+- Сводка обычных, экстремальных и SUSPENDED-сигналов.
+- Фильтр отображаемых линий графика; по умолчанию максимум 20 линий для читаемости.
+- Экспорт топа и всех сигналов в CSV.
+- Максимальный коэффициент по умолчанию 100.
+- Исторический анализ CSV; live API polling не подключён.
 
-Run locally:
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+Запуск: `pip install -r requirements.txt` затем `streamlit run app.py`.
 
-For Streamlit Cloud, replace `app.py` and `requirements.txt` in the GitHub repository and commit changes. Keep API keys out of the public repository.
+Для Streamlit Cloud замените `app.py` и при необходимости `requirements.txt` в GitHub и выполните Commit changes.
