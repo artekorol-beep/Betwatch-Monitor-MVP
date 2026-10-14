@@ -45,6 +45,23 @@ def connect_db():
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_obs_time ON observations(snapshot_time_utc)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_obs_keys ON observations(match_id, market_id, runner_id)")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS volume_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT UNIQUE,
+            detected_at_utc TEXT NOT NULL,
+            match_id TEXT, team_1 TEXT, team_2 TEXT, league TEXT,
+            score_home_at_signal TEXT, score_away_at_signal TEXT, minute_at_signal TEXT,
+            market_id TEXT, market_name TEXT, runner_id TEXT, runner_name TEXT,
+            market_status TEXT, previous_volume REAL, current_volume REAL,
+            volume_increase_eur REAL, seconds_between REAL,
+            odd_at_signal REAL, previous_odd REAL,
+            match_finished INTEGER DEFAULT 0,
+            final_home_score TEXT, final_away_score TEXT,
+            match_result TEXT, market_result TEXT, settled_at_utc TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_volume_events_match ON volume_events(match_id)")
     con.commit()
     return con
 
@@ -138,6 +155,144 @@ def read_history(limit=500000):
     df = normalize_dataframe(df)
     return df.sort_values("snapshot_time_utc")
 
+def ensure_event_columns():
+    # Safe migration for DBs created by earlier app versions.
+    with connect_db() as con:
+        existing = {row[1] for row in con.execute("PRAGMA table_info(volume_events)").fetchall()}
+        additions = {
+            "match_finished": "INTEGER DEFAULT 0",
+            "final_home_score": "TEXT", "final_away_score": "TEXT",
+            "match_result": "TEXT", "market_result": "TEXT", "settled_at_utc": "TEXT",
+        }
+        for name, sql_type in additions.items():
+            if name not in existing:
+                con.execute(f"ALTER TABLE volume_events ADD COLUMN {name} {sql_type}")
+        con.commit()
+
+
+def settle_volume_events(latest_matches):
+    """Settle only after API marks match finished and provides final score."""
+    if not latest_matches:
+        return 0
+    latest = {}
+    for m in latest_matches:
+        live = m.get("live_info") or {}
+        mid = m.get("match_id")
+        if mid is not None:
+            latest[str(mid)] = {
+                "finished": live.get("finished"),
+                "home": live.get("goal_v1"),
+                "away": live.get("goal_v2"),
+            }
+    settled = 0
+    with connect_db() as con:
+        events = pd.read_sql_query(
+            "SELECT event_id, match_id, market_name, runner_name FROM volume_events WHERE match_finished=0",
+            con
+        )
+        for event in events.itertuples(index=False):
+            result = latest.get(str(event.match_id))
+            if not result:
+                continue
+            finished = str(result["finished"]).lower() in ("true", "1", "yes", "finished", "complete", "completed")
+            try:
+                home, away = int(float(result["home"])), int(float(result["away"]))
+            except (TypeError, ValueError):
+                continue
+            if not finished:
+                continue
+            match_result = "Ничья" if home == away else ("Победа хозяев" if home > away else "Победа гостей")
+            market_result = resolve_market_result(event.market_name, event.runner_name, home, away)
+            con.execute("""
+                UPDATE volume_events
+                SET match_finished=1, final_home_score=?, final_away_score=?, match_result=?,
+                    market_result=?, settled_at_utc=?
+                WHERE event_id=?
+            """, (str(home), str(away), match_result, market_result, datetime.now(timezone.utc).isoformat(), int(event.event_id)))
+            settled += 1
+        con.commit()
+    return settled
+
+
+def resolve_market_result(market_name, runner_name, home, away):
+    """Settle common football markets. Unknown markets are explicitly left unresolved."""
+    market = str(market_name or "").lower()
+    runner = str(runner_name or "").lower().strip()
+    total = home + away
+    if "match odds" in market or market == "1x2":
+        if runner in ("the draw", "draw", "tie", "x"):
+            return "Выиграл" if home == away else "Проиграл"
+        if runner in ("home", "1") or (runner and runner in str(market_name).lower() and runner not in ("away",)):
+            # Use team labels only where caller has them unavailable? Keep standard runner labels.
+            pass
+        if runner in ("the draw", "draw", "tie", "x"):
+            return "Выиграл" if home == away else "Проиграл"
+        return "Нужна проверка исхода"
+    if "over/under" in market or "goals" in market or "first half goals" in market:
+        import re
+        match = re.search(r"(\d+(?:\.\d+)?)", str(market_name))
+        if not match:
+            match = re.search(r"(\d+(?:\.\d+)?)", runner)
+        if not match:
+            return "Не удалось определить линию"
+        line = float(match.group(1))
+        is_over = "over" in runner
+        is_under = "under" in runner
+        if not (is_over or is_under):
+            return "Нужна проверка исхода"
+        # First-half markets cannot be settled from final score alone.
+        if "first half" in market or "half time" in market:
+            return "Нужны данные счёта на перерыв"
+        if total == line:
+            return "Возврат" if line.is_integer() else "Неопределённо"
+        won = total > line if is_over else total < line
+        return "Выиграл" if won else "Проиграл"
+    if "both teams to score" in market:
+        yes = home > 0 and away > 0
+        if runner in ("yes", "да"):
+            return "Выиграл" if yes else "Проиграл"
+        if runner in ("no", "нет"):
+            return "Выиграл" if not yes else "Проиграл"
+    return "Нужна проверка исхода"
+
+
+def persist_volume_events(signals):
+    if signals is None or signals.empty:
+        return 0
+    inserted = 0
+    with connect_db() as con:
+        for row in signals.itertuples(index=False):
+            key = "|".join(str(getattr(row, c, "")) for c in
+                           ("snapshot_time_utc", "match_id", "market_id", "runner_id"))
+            try:
+                con.execute("""
+                    INSERT OR IGNORE INTO volume_events (
+                        event_key, detected_at_utc, match_id, team_1, team_2, league,
+                        score_home_at_signal, score_away_at_signal, minute_at_signal,
+                        market_id, market_name, runner_id, runner_name, market_status,
+                        previous_volume, current_volume, volume_increase_eur, seconds_between,
+                        odd_at_signal, previous_odd
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    key, str(row.snapshot_time_utc), str(row.match_id), str(row.team_1), str(row.team_2), str(row.league),
+                    str(row.score_home), str(row.score_away), str(row.match_time),
+                    str(row.market_id), str(row.market_name), str(row.runner_id), str(row.runner_name), str(row.market_status),
+                    float(row.previous_volume), float(row.volume), float(row.volume_increase_eur), float(row.seconds_between),
+                    (float(row.odd) if pd.notna(row.odd) else None),
+                    (float(row.previous_odd) if hasattr(row, "previous_odd") and pd.notna(row.previous_odd) else None),
+                ))
+                inserted += con.execute("SELECT changes()").fetchone()[0]
+            except Exception:
+                continue
+        con.commit()
+    return inserted
+
+
+def read_volume_events():
+    with connect_db() as con:
+        return pd.read_sql_query("SELECT * FROM volume_events ORDER BY detected_at_utc DESC", con)
+
+
 def score_label(row):
     home_score = row.get("score_home")
     away_score = row.get("score_away")
@@ -209,6 +364,7 @@ def make_signals(data, threshold_pct, max_gap, max_odd, extreme_ratio):
 
 # Initialize persistent local DB.
 connect_db()
+ensure_event_columns()
 
 with st.sidebar:
     st.header("Источник данных")
@@ -288,8 +444,14 @@ if st.session_state.get("live_running", False):
                     st.session_state["live_next_run"] = time.monotonic() + wait_seconds
                 else:
                     response.raise_for_status()
-                    batch, matches_count = api_to_rows(response.json(), stamp)
+                    payload = response.json()
+                    batch, matches_count = api_to_rows(payload, stamp)
+                    raw_matches = payload if isinstance(payload, list) else next(
+                        (payload.get(k) for k in ("data", "matches", "results")
+                         if isinstance(payload, dict) and isinstance(payload.get(k), list)), []
+                    )
                     saved = save_rows(batch, source="api")
+                    settle_volume_events(raw_matches)
                     st.session_state["live_last_error"] = ""
                     st.session_state["live_backoff_seconds"] = 0
                     st.session_state["live_last_batch"] = saved
@@ -349,6 +511,10 @@ if not history.empty:
 
     signals = make_signals(view, threshold, int(max_gap), float(max_odd), float(extreme_ratio))
     volume_signals = make_volume_signals(view, float(min_volume_increase), int(max_gap))
+    # Persist only signals from API-collected observations; imported CSV is not used as new live events.
+    api_view = view[view["source"].eq("api")].copy() if "source" in view.columns else view.iloc[0:0].copy()
+    api_volume_signals = make_volume_signals(api_view, float(min_volume_increase), int(max_gap))
+    newly_logged = persist_volume_events(api_volume_signals)
     if not show_suspended:
         signals = signals[~signals["suspended_flag"]]
         if not volume_signals.empty:
@@ -380,6 +546,28 @@ if not history.empty:
         st.metric("Сигналов роста объёма", len(vol_view))
         st.dataframe(vol_view, use_container_width=True, hide_index=True, height=350)
         st.download_button("⬇ Скачать сигналы объёма CSV", vol_view.to_csv(index=False).encode("utf-8-sig"), file_name="betwatch_live_volume_signals.csv", mime="text/csv")
+
+    st.subheader("Журнал скачков объёма и результаты")
+    journal = read_volume_events()
+    if journal.empty:
+        st.info("Журнал пока пуст. Сигналы начнут записываться по новым LIVE-снимкам, когда прирост объёма достигнет порога.")
+    else:
+        total_events = len(journal)
+        settled = int(journal["match_finished"].fillna(0).astype(int).sum())
+        known_market = int(journal["market_result"].fillna("").isin(["Выиграл", "Проиграл", "Возврат"]).sum())
+        wins = int(journal["market_result"].eq("Выиграл").sum())
+        losses = int(journal["market_result"].eq("Проиграл").sum())
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("Скачков в журнале", total_events)
+        m2.metric("Завершённых матчей", settled)
+        m3.metric("Рынок выиграл", wins)
+        m4.metric("Рынок проиграл", losses)
+        st.caption("Автоматически рассчитываются только поддерживаемые рынки. Для 1X2, рынков первого тайма и неизвестных рынков результат помечается для проверки, если данных недостаточно.")
+        journal_view = journal.copy()
+        journal_view["detected_at_utc"] = pd.to_datetime(journal_view["detected_at_utc"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        st.dataframe(journal_view, use_container_width=True, hide_index=True, height=400)
+        st.download_button("⬇ Скачать журнал скачков и расчётов CSV", journal_view.to_csv(index=False).encode("utf-8-sig"), file_name="betwatch_volume_event_journal.csv", mime="text/csv")
+
     st.subheader("Коэффициенты во времени (UTC)")
     chart = view.dropna(subset=["odd","snapshot_time_utc"]).copy()
     chart = chart[(chart["odd"] > 1) & (chart["odd"] <= max_odd)]
