@@ -155,6 +155,33 @@ def score_label(row):
     return score + minute_text
 
 
+def make_volume_signals(data, min_volume_increase_eur, max_gap):
+    """Detect cumulative matched-volume increases per match/market/runner between snapshots."""
+    if "volume" not in data.columns:
+        return pd.DataFrame()
+    work = data.dropna(subset=["snapshot_time_utc", "volume"]).copy()
+    work = work[work["volume"] >= 0].sort_values("snapshot_time_utc")
+    key_cols = ["match_id", "market_id", "runner_id"]
+    work = work.drop_duplicates(subset=["snapshot_time_utc"] + key_cols, keep="last")
+    group = work.groupby(key_cols, dropna=False, sort=False)
+    work["previous_volume"] = group["volume"].shift(1)
+    work["previous_time"] = group["snapshot_time_utc"].shift(1)
+    work["seconds_between"] = (work["snapshot_time_utc"] - work["previous_time"]).dt.total_seconds()
+    work["volume_increase_eur"] = work["volume"] - work["previous_volume"]
+    valid = (
+        work["previous_volume"].notna()
+        & work["volume_increase_eur"].ge(float(min_volume_increase_eur))
+        & work["seconds_between"].between(0.001, float(max_gap))
+    )
+    signals = work.loc[valid].copy()
+    if signals.empty:
+        return signals
+    signals["volume_status_note"] = signals["market_status"].map(
+        lambda x: "SUSPENDED — рынок приостановлен" if x == "SUSPENDED" else "Рост объёма"
+    )
+    return signals.sort_values(["volume_increase_eur", "snapshot_time_utc"], ascending=[False, False])
+
+
 def make_signals(data, threshold_pct, max_gap, max_odd, extreme_ratio):
     work = data.dropna(subset=["snapshot_time_utc","odd"]).copy()
     work = work[(work["odd"] > 1.0) & (work["odd"] <= max_odd)]
@@ -213,6 +240,7 @@ with st.sidebar:
     max_gap = st.number_input("Макс. интервал между снимками (сек.)", min_value=1, max_value=86400, value=120, step=30)
     max_odd = st.number_input("Максимальный коэффициент", min_value=1.01, max_value=100000.0, value=100.0, step=10.0)
     extreme_ratio = st.number_input("Экстремальный скачок: отношение коэффициентов ≥", min_value=2.0, max_value=1000.0, value=5.0, step=1.0)
+    min_volume_increase = st.number_input("Сигнал при росте объёма ставок (€)", min_value=1.0, max_value=10000000.0, value=2000.0, step=500.0)
     show_suspended = st.checkbox("Показывать SUSPENDED отдельно", value=True)
     refresh_seconds = st.selectbox("Автообновление панели", [5, 10, 15, 30, 60], index=2)
 
@@ -320,8 +348,11 @@ if not history.empty:
                 )
 
     signals = make_signals(view, threshold, int(max_gap), float(max_odd), float(extreme_ratio))
+    volume_signals = make_volume_signals(view, float(min_volume_increase), int(max_gap))
     if not show_suspended:
         signals = signals[~signals["suspended_flag"]]
+        if not volume_signals.empty:
+            volume_signals = volume_signals[volume_signals["market_status"] != "SUSPENDED"]
     a,b,c,d = st.columns(4)
     a.metric("Сигналов", len(signals))
     b.metric("Обычных", int((~signals["extreme_jump"] & ~signals["suspended_flag"]).sum()))
@@ -335,7 +366,20 @@ if not history.empty:
         signals_view = signals[show_cols].copy()
         signals_view["snapshot_time_utc"] = signals_view["snapshot_time_utc"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
         st.dataframe(signals_view, use_container_width=True, hide_index=True, height=350)
-        st.download_button("⬇ Скачать сигналы CSV", signals_view.to_csv(index=False).encode("utf-8-sig"), file_name="betwatch_live_signals.csv", mime="text/csv")
+        st.download_button("⬇ Скачать сигналы коэффициентов CSV", signals_view.to_csv(index=False).encode("utf-8-sig"), file_name="betwatch_live_odds_signals.csv", mime="text/csv")
+
+    st.subheader(f"Резкий рост объёма ставок: +€{min_volume_increase:,.0f} и более")
+    st.caption("Сравнивается поле volume одного и того же исхода между соседними снимками. Предполагается, что API отдаёт накопленный объём в евро; если volume означает другое, порог нужно интерпретировать соответственно.")
+    if volume_signals.empty:
+        st.info("Сигналов роста объёма пока нет. Нужны два снимка одного исхода и прирост volume выше заданного порога.")
+    else:
+        vol_cols = ["snapshot_time_utc","match_label","score_home","score_away","match_time","market_name","market_id","runner_name","market_status","previous_volume","volume","volume_increase_eur","seconds_between","volume_status_note"]
+        vol_view = volume_signals[vol_cols].copy()
+        vol_view["snapshot_time_utc"] = vol_view["snapshot_time_utc"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        vol_view = vol_view.rename(columns={"volume":"current_volume"})
+        st.metric("Сигналов роста объёма", len(vol_view))
+        st.dataframe(vol_view, use_container_width=True, hide_index=True, height=350)
+        st.download_button("⬇ Скачать сигналы объёма CSV", vol_view.to_csv(index=False).encode("utf-8-sig"), file_name="betwatch_live_volume_signals.csv", mime="text/csv")
     st.subheader("Коэффициенты во времени (UTC)")
     chart = view.dropna(subset=["odd","snapshot_time_utc"]).copy()
     chart = chart[(chart["odd"] > 1) & (chart["odd"] <= max_odd)]
