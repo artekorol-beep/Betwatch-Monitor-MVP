@@ -138,6 +138,23 @@ def read_history(limit=500000):
     df = normalize_dataframe(df)
     return df.sort_values("snapshot_time_utc")
 
+def score_label(row):
+    home_score = row.get("score_home")
+    away_score = row.get("score_away")
+    if pd.isna(home_score) or pd.isna(away_score) or str(home_score).strip() == "" or str(away_score).strip() == "":
+        score = "счёт н/д"
+    else:
+        score = f"{home_score:g}:{away_score:g}" if isinstance(home_score, (int, float)) and isinstance(away_score, (int, float)) else f"{home_score}:{away_score}"
+    minute = row.get("match_time")
+    minute_text = ""
+    if pd.notna(minute) and str(minute).strip() and str(minute).lower() not in ("none", "nan"):
+        minute_text = f" · {minute}'"
+    ht = row.get("is_ht")
+    if str(ht).lower() in ("true", "1", "yes"):
+        minute_text += " · ПЕРЕРЫВ"
+    return score + minute_text
+
+
 def make_signals(data, threshold_pct, max_gap, max_odd, extreme_ratio):
     work = data.dropna(subset=["snapshot_time_utc","odd"]).copy()
     work = work[(work["odd"] > 1.0) & (work["odd"] <= max_odd)]
@@ -286,6 +303,22 @@ if not history.empty:
     sel_matches = st.multiselect("Матчи", matches, default=matches)
     sel_markets = st.multiselect("Рынки", markets, default=markets)
     view = filtered[filtered["match_label"].isin(sel_matches) & filtered["market_name"].isin(sel_markets)].copy()
+
+    st.subheader("Текущий счёт матчей")
+    score_source = filtered.sort_values("snapshot_time_utc").drop_duplicates("match_id", keep="last")
+    score_source = score_source[score_source["match_label"].isin(sel_matches)].copy()
+    if score_source.empty:
+        st.info("Нет данных о счёте для выбранных матчей.")
+    else:
+        score_cols = st.columns(min(3, len(score_source)))
+        for i, (_, score_row) in enumerate(score_source.iterrows()):
+            with score_cols[i % len(score_cols)]:
+                st.metric(
+                    label=str(score_row["match_label"]),
+                    value=score_label(score_row),
+                    help=f"Последний снимок: {score_row['snapshot_time_utc']}"
+                )
+
     signals = make_signals(view, threshold, int(max_gap), float(max_odd), float(extreme_ratio))
     if not show_suspended:
         signals = signals[~signals["suspended_flag"]]
@@ -298,7 +331,7 @@ if not history.empty:
     if signals.empty:
         st.info("Сигналов пока нет: нужны как минимум два снимка одного исхода.")
     else:
-        show_cols = ["snapshot_time_utc","match_label","market_name","market_id","runner_name","market_status","previous_odd","odd","change_pct","seconds_between","extreme_jump","signal_note"]
+        show_cols = ["snapshot_time_utc","match_label","score_home","score_away","match_time","market_name","market_id","runner_name","market_status","previous_odd","odd","change_pct","seconds_between","extreme_jump","signal_note"]
         signals_view = signals[show_cols].copy()
         signals_view["snapshot_time_utc"] = signals_view["snapshot_time_utc"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
         st.dataframe(signals_view, use_container_width=True, hide_index=True, height=350)
