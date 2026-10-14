@@ -206,6 +206,7 @@ if start_live:
     st.session_state["live_interval"] = int(interval)
     st.session_state["live_key"] = key
     st.session_state["live_last_error"] = ""
+    st.session_state["live_backoff_seconds"] = 0
     st.session_state["live_started_at"] = datetime.now(timezone.utc).isoformat()
     st.rerun()
 
@@ -217,17 +218,40 @@ if st.session_state.get("live_running", False):
     else:
         stamp = datetime.now(timezone.utc).isoformat()
         try:
-            response = requests.get(st.session_state["live_url"], headers={"Authorization": f"Token {st.session_state['live_key']}"}, timeout=20)
-            response.raise_for_status()
-            batch, matches_count = api_to_rows(response.json(), stamp)
-            saved = save_rows(batch, source="api")
-            st.session_state["live_last_error"] = ""
-            st.session_state["live_last_batch"] = saved
-            st.session_state["live_last_matches"] = matches_count
-            st.session_state["live_last_poll"] = stamp
+            response = requests.get(
+                st.session_state["live_url"],
+                headers={"Authorization": f"Token {st.session_state['live_key']}"},
+                timeout=20,
+            )
+            if response.status_code == 429:
+                # Honor Retry-After where available; otherwise use exponential backoff.
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    wait_seconds = max(60, int(float(retry_after)))
+                except (TypeError, ValueError):
+                    prior_backoff = int(st.session_state.get("live_backoff_seconds", 60))
+                    wait_seconds = min(max(60, prior_backoff * 2), 900)
+                st.session_state["live_backoff_seconds"] = wait_seconds
+                st.session_state["live_last_error"] = (
+                    f"HTTP 429: лимит запросов. Следующая попытка через {wait_seconds} сек."
+                )
+                st.session_state["live_next_run"] = time.monotonic() + wait_seconds
+            else:
+                response.raise_for_status()
+                batch, matches_count = api_to_rows(response.json(), stamp)
+                saved = save_rows(batch, source="api")
+                st.session_state["live_last_error"] = ""
+                st.session_state["live_backoff_seconds"] = 0
+                st.session_state["live_last_batch"] = saved
+                st.session_state["live_last_matches"] = matches_count
+                st.session_state["live_last_poll"] = stamp
+                st.session_state["live_next_run"] = time.monotonic() + st.session_state["live_interval"]
         except Exception as exc:
             st.session_state["live_last_error"] = f"{type(exc).__name__}: {exc}"
-        st.session_state["live_next_run"] = time.monotonic() + st.session_state["live_interval"]
+            prior_backoff = int(st.session_state.get("live_backoff_seconds", 0))
+            wait_seconds = min(max(30, prior_backoff * 2 if prior_backoff else 30), 900)
+            st.session_state["live_backoff_seconds"] = wait_seconds
+            st.session_state["live_next_run"] = time.monotonic() + wait_seconds
 
 history = read_history()
 if not history.empty:
@@ -244,7 +268,9 @@ if not history.empty:
     if st.session_state.get("live_running", False):
         st.info(f"LIVE активен · последний пакет: {st.session_state.get('live_last_batch', 0)} строк · матчей: {st.session_state.get('live_last_matches', '—')} · следующий цикл примерно через {st.session_state.get('live_interval', interval)} сек.")
         if st.session_state.get("live_last_error"):
-            st.error("Ошибка последнего запроса: " + st.session_state["live_last_error"])
+            st.warning("Статус последнего запроса: " + st.session_state["live_last_error"])
+        next_in = max(0, int(st.session_state.get("live_next_run", time.monotonic()) - time.monotonic()))
+        st.caption(f"Следующая попытка примерно через {next_in} сек.")
         st.progress(max(0.0, min(1.0, 1 - max(0, st.session_state.get("live_deadline", 0) - time.monotonic()) / max(1, int(run_minutes * 60)))))
     elif st.session_state.get("live_started_at"):
         st.caption("Последняя LIVE-сессия: " + str(st.session_state["live_started_at"]))
