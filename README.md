@@ -1,12 +1,20 @@
-# Betwatch Monitor — Top Changes update
+# Betwatch Live Monitor MVP
 
-- Рейтинг топ-10/20/50 изменений коэффициентов.
-- Сводка обычных, экстремальных и SUSPENDED-сигналов.
-- Фильтр отображаемых линий графика; по умолчанию максимум 20 линий для читаемости.
-- Экспорт топа и всех сигналов в CSV.
-- Максимальный коэффициент по умолчанию 100.
-- Исторический анализ CSV; live API polling не подключён.
+- Accepts the existing historical CSV schema and the collector schema (`timestamp`, `home`, `away`, `minute`, `home_goals`, `away_goals`).
+- Optional manual API polling against `https://api.betwatch.fr/api/v1/football/live`.
+- Collects all market names returned by API (no Over/Under-only filter).
+- API key must be configured as Streamlit secret `BETWATCH_API_KEY`; never hardcode it or commit it to GitHub.
+- API polling is a bounded foreground run initiated by button; it is not a permanent background service and app reruns/restarts may interrupt it.
+- Captured rows can be downloaded as CSV and re-uploaded for signal analysis.
 
-Запуск: `pip install -r requirements.txt` затем `streamlit run app.py`.
+Streamlit Cloud Secrets TOML:
+```toml
+BETWATCH_API_KEY = "YOUR_KEY_HERE"
+```
+Use app settings → Secrets. Do not share or commit the real key.
 
-Для Streamlit Cloud замените `app.py` и при необходимости `requirements.txt` в GitHub и выполните Commit changes.
+Run locally:
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
