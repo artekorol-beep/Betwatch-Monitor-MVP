@@ -208,50 +208,56 @@ if start_live:
     st.session_state["live_last_error"] = ""
     st.session_state["live_backoff_seconds"] = 0
     st.session_state["live_started_at"] = datetime.now(timezone.utc).isoformat()
+    st.session_state["live_next_run"] = time.monotonic()
     st.rerun()
 
 if st.session_state.get("live_running", False):
-    remaining = st.session_state.get("live_deadline", 0) - time.monotonic()
+    now_mono = time.monotonic()
+    remaining = st.session_state.get("live_deadline", 0) - now_mono
     if remaining <= 0:
         st.session_state["live_running"] = False
         st.success("LIVE-сессия завершена. Все полученные снимки сохранены в историю.")
     else:
-        stamp = datetime.now(timezone.utc).isoformat()
-        try:
-            response = requests.get(
-                st.session_state["live_url"],
-                headers={"Authorization": f"Token {st.session_state['live_key']}"},
-                timeout=20,
-            )
-            if response.status_code == 429:
-                # Honor Retry-After where available; otherwise use exponential backoff.
-                retry_after = response.headers.get("Retry-After", "")
-                try:
-                    wait_seconds = max(60, int(float(retry_after)))
-                except (TypeError, ValueError):
-                    prior_backoff = int(st.session_state.get("live_backoff_seconds", 60))
-                    wait_seconds = min(max(60, prior_backoff * 2), 900)
-                st.session_state["live_backoff_seconds"] = wait_seconds
-                st.session_state["live_last_error"] = (
-                    f"HTTP 429: лимит запросов. Следующая попытка через {wait_seconds} сек."
+        # IMPORTANT: Streamlit reruns the script to refresh the UI.
+        # Do not poll the API on every rerun; poll only when the scheduled time arrives.
+        next_run = float(st.session_state.get("live_next_run", 0))
+        if now_mono >= next_run:
+            stamp = datetime.now(timezone.utc).isoformat()
+            try:
+                response = requests.get(
+                    st.session_state["live_url"],
+                    headers={"Authorization": f"Token {st.session_state['live_key']}"},
+                    timeout=20,
                 )
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        wait_seconds = max(60, int(float(retry_after)))
+                    except (TypeError, ValueError):
+                        prior_backoff = int(st.session_state.get("live_backoff_seconds", 0))
+                        wait_seconds = min(max(60, prior_backoff * 2 if prior_backoff else 60), 900)
+                    st.session_state["live_backoff_seconds"] = wait_seconds
+                    st.session_state["live_last_error"] = (
+                        f"HTTP 429: лимит запросов. Следующая попытка через {wait_seconds} сек."
+                    )
+                    st.session_state["live_next_run"] = time.monotonic() + wait_seconds
+                else:
+                    response.raise_for_status()
+                    batch, matches_count = api_to_rows(response.json(), stamp)
+                    saved = save_rows(batch, source="api")
+                    st.session_state["live_last_error"] = ""
+                    st.session_state["live_backoff_seconds"] = 0
+                    st.session_state["live_last_batch"] = saved
+                    st.session_state["live_last_matches"] = matches_count
+                    st.session_state["live_last_poll"] = stamp
+                    st.session_state["live_last_success"] = stamp
+                    st.session_state["live_next_run"] = time.monotonic() + st.session_state["live_interval"]
+            except Exception as exc:
+                st.session_state["live_last_error"] = f"{type(exc).__name__}: {exc}"
+                prior_backoff = int(st.session_state.get("live_backoff_seconds", 0))
+                wait_seconds = min(max(30, prior_backoff * 2 if prior_backoff else 30), 900)
+                st.session_state["live_backoff_seconds"] = wait_seconds
                 st.session_state["live_next_run"] = time.monotonic() + wait_seconds
-            else:
-                response.raise_for_status()
-                batch, matches_count = api_to_rows(response.json(), stamp)
-                saved = save_rows(batch, source="api")
-                st.session_state["live_last_error"] = ""
-                st.session_state["live_backoff_seconds"] = 0
-                st.session_state["live_last_batch"] = saved
-                st.session_state["live_last_matches"] = matches_count
-                st.session_state["live_last_poll"] = stamp
-                st.session_state["live_next_run"] = time.monotonic() + st.session_state["live_interval"]
-        except Exception as exc:
-            st.session_state["live_last_error"] = f"{type(exc).__name__}: {exc}"
-            prior_backoff = int(st.session_state.get("live_backoff_seconds", 0))
-            wait_seconds = min(max(30, prior_backoff * 2 if prior_backoff else 30), 900)
-            st.session_state["live_backoff_seconds"] = wait_seconds
-            st.session_state["live_next_run"] = time.monotonic() + wait_seconds
 
 history = read_history()
 if not history.empty:
@@ -266,11 +272,11 @@ if not history.empty:
     c4.metric("Рынков", f"{history['market_id'].nunique():,}".replace(",", " "))
     c5.metric("Пустой odd", f"{history['odd'].isna().sum():,}".replace(",", " "))
     if st.session_state.get("live_running", False):
-        st.info(f"LIVE активен · последний пакет: {st.session_state.get('live_last_batch', 0)} строк · матчей: {st.session_state.get('live_last_matches', '—')} · следующий цикл примерно через {st.session_state.get('live_interval', interval)} сек.")
+        st.info(f"LIVE активен · последний пакет: {st.session_state.get('live_last_batch', 0)} строк · матчей: {st.session_state.get('live_last_matches', '—')} · интервал опроса API: {st.session_state.get('live_interval', interval)} сек.")
         if st.session_state.get("live_last_error"):
             st.warning("Статус последнего запроса: " + st.session_state["live_last_error"])
         next_in = max(0, int(st.session_state.get("live_next_run", time.monotonic()) - time.monotonic()))
-        st.caption(f"Следующая попытка примерно через {next_in} сек.")
+        st.caption(f"Следующий запрос к API примерно через {next_in} сек. Интерфейс обновляется отдельно и не вызывает API-запрос сам по себе.")
         st.progress(max(0.0, min(1.0, 1 - max(0, st.session_state.get("live_deadline", 0) - time.monotonic()) / max(1, int(run_minutes * 60)))))
     elif st.session_state.get("live_started_at"):
         st.caption("Последняя LIVE-сессия: " + str(st.session_state["live_started_at"]))

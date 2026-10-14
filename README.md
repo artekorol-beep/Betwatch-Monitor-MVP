@@ -1,12 +1,11 @@
-# Betwatch LIVE v2 — rate-limit protection
+# Betwatch LIVE — исправление частых API-запросов
 
-This version handles HTTP 429 responses by honoring `Retry-After` when provided, otherwise applying exponential backoff up to 15 minutes. Existing SQLite history is retained.
+Главное исправление: API вызывается только когда наступает `live_next_run`. Перерисовка Streamlit больше не запускает запрос сама по себе.
 
-Configure Streamlit Cloud → Manage app → Settings → Secrets:
-```toml
-BETWATCH_API_KEY = "YOUR_REAL_KEY"
-```
+Обновление:
+1. Замени `app.py` и `requirements.txt` в GitHub-репозитории.
+2. Commit changes.
+3. В Streamlit Cloud перезапусти приложение (Manage app → Reboot app).
+4. Проверь короткую сессию и смотри строку «Следующий запрос к API примерно через … сек.».
 
-Replace `app.py` and `requirements.txt` in the existing repo, commit changes, then reboot the Streamlit app. Do not commit the API key.
-
-The live polling loop remains a bounded foreground session. SQLite persistence depends on the hosting filesystem.
+Секрет `BETWATCH_API_KEY` оставь в Streamlit Secrets. Не добавляй ключ в репозиторий.
