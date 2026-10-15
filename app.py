@@ -187,7 +187,7 @@ def settle_volume_events(latest_matches):
     settled = 0
     with connect_db() as con:
         events = pd.read_sql_query(
-            "SELECT event_id, match_id, market_name, runner_name FROM volume_events WHERE match_finished=0",
+            "SELECT event_id, match_id, team_1, team_2, market_name, runner_name FROM volume_events WHERE match_finished=0",
             con
         )
         for event in events.itertuples(index=False):
@@ -202,7 +202,7 @@ def settle_volume_events(latest_matches):
             if not finished:
                 continue
             match_result = "Ничья" if home == away else ("Победа хозяев" if home > away else "Победа гостей")
-            market_result = resolve_market_result(event.market_name, event.runner_name, home, away)
+            market_result = resolve_market_result(event.market_name, event.runner_name, home, away, event.team_1, event.team_2)
             con.execute("""
                 UPDATE volume_events
                 SET match_finished=1, final_home_score=?, final_away_score=?, match_result=?,
@@ -214,45 +214,57 @@ def settle_volume_events(latest_matches):
     return settled
 
 
-def resolve_market_result(market_name, runner_name, home, away):
-    """Settle common football markets. Unknown markets are explicitly left unresolved."""
+def resolve_market_result(market_name, runner_name, home, away, team_home="", team_away=""):
+    """Settle common full-time football markets; leave ambiguous markets for review."""
+    import re
     market = str(market_name or "").lower()
-    runner = str(runner_name or "").lower().strip()
+    runner = str(runner_name or "").strip().lower()
+    home_name = str(team_home or "").strip().lower()
+    away_name = str(team_away or "").strip().lower()
     total = home + away
-    if "match odds" in market or market == "1x2":
-        if runner in ("the draw", "draw", "tie", "x"):
+
+    # Full-time 1X2 / match odds. Match team labels to the stored fixture names.
+    if "match odds" in market or market in ("1x2", "match result", "full time result", "full-time result"):
+        if runner in ("the draw", "draw", "tie", "x", "удалить", "ничья"):
             return "Выиграл" if home == away else "Проиграл"
-        if runner in ("home", "1") or (runner and runner in str(market_name).lower() and runner not in ("away",)):
-            # Use team labels only where caller has them unavailable? Keep standard runner labels.
-            pass
-        if runner in ("the draw", "draw", "tie", "x"):
-            return "Выиграл" if home == away else "Проиграл"
+        if runner in ("home", "home win", "1") or (home_name and runner == home_name):
+            return "Выиграл" if home > away else "Проиграл"
+        if runner in ("away", "away win", "2") or (away_name and runner == away_name):
+            return "Выиграл" if away > home else "Проиграл"
+        # Some providers include the team name plus extra text (e.g. "Team A (1)").
+        if home_name and home_name in runner and away_name not in runner:
+            return "Выиграл" if home > away else "Проиграл"
+        if away_name and away_name in runner and home_name not in runner:
+            return "Выиграл" if away > home else "Проиграл"
         return "Нужна проверка исхода"
-    if "over/under" in market or "goals" in market or "first half goals" in market:
-        import re
+
+    if "both teams to score" in market or "btts" in market:
+        yes = home > 0 and away > 0
+        if runner in ("yes", "да"):
+            return "Выиграл" if yes else "Проиграл"
+        if runner in ("no", "нет"):
+            return "Выиграл" if not yes else "Проиграл"
+        return "Нужна проверка исхода"
+
+    if "over/under" in market or "goals" in market or "total goals" in market:
+        # First-half markets require the halftime score; never use the final score as a substitute.
+        if "first half" in market or "half time" in market or "1st half" in market:
+            return "Нужны данные счёта на перерыв"
         match = re.search(r"(\d+(?:\.\d+)?)", str(market_name))
         if not match:
             match = re.search(r"(\d+(?:\.\d+)?)", runner)
         if not match:
             return "Не удалось определить линию"
         line = float(match.group(1))
-        is_over = "over" in runner
-        is_under = "under" in runner
+        is_over = "over" in runner or "больше" in runner
+        is_under = "under" in runner or "меньше" in runner
         if not (is_over or is_under):
             return "Нужна проверка исхода"
-        # First-half markets cannot be settled from final score alone.
-        if "first half" in market or "half time" in market:
-            return "Нужны данные счёта на перерыв"
         if total == line:
-            return "Возврат" if line.is_integer() else "Неопределённо"
+            return "Возврат" if line.is_integer() else "Нужна проверка азиатской линии"
         won = total > line if is_over else total < line
         return "Выиграл" if won else "Проиграл"
-    if "both teams to score" in market:
-        yes = home > 0 and away > 0
-        if runner in ("yes", "да"):
-            return "Выиграл" if yes else "Проиграл"
-        if runner in ("no", "нет"):
-            return "Выиграл" if not yes else "Проиграл"
+
     return "Нужна проверка исхода"
 
 
@@ -381,7 +393,7 @@ with st.sidebar:
     st.divider()
     st.header("LIVE API")
     api_url = st.text_input("API URL", value=API_URL_DEFAULT)
-    interval = st.number_input("Интервал (сек.)", min_value=10, max_value=3600, value=30, step=10)
+    interval = st.number_input("Интервал опроса API (сек.)", min_value=15, max_value=3600, value=15, step=5)
     run_minutes = st.number_input("Продолжительность (мин.)", min_value=1, max_value=1440, value=30, step=5)
     key = get_api_key()
     if key:
@@ -511,9 +523,10 @@ if not history.empty:
 
     signals = make_signals(view, threshold, int(max_gap), float(max_odd), float(extreme_ratio))
     volume_signals = make_volume_signals(view, float(min_volume_increase), int(max_gap))
-    # Persist only signals from API-collected observations; imported CSV is not used as new live events.
-    api_view = view[view["source"].eq("api")].copy() if "source" in view.columns else view.iloc[0:0].copy()
-    api_volume_signals = make_volume_signals(api_view, float(min_volume_increase), int(max_gap))
+    # Journal API-originated signals from the full history, independent of UI filters.
+    # Imported CSV rows remain excluded from the event journal.
+    api_history = history[history["source"].eq("api")].copy() if "source" in history.columns else history.iloc[0:0].copy()
+    api_volume_signals = make_volume_signals(api_history, float(min_volume_increase), int(max_gap))
     newly_logged = persist_volume_events(api_volume_signals)
     if not show_suspended:
         signals = signals[~signals["suspended_flag"]]

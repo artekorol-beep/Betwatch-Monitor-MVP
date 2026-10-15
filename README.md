@@ -1,12 +1,19 @@
-# Betwatch LIVE — volume event journal and settlement
+# Betwatch LIVE Monitor — fixes
 
-Includes LIVE collection, current score, odds-change signals, and detection of cumulative `volume` increases of at least €2,000 by default. New API-originated volume signals are persisted in SQLite as a journal. When the API marks a match finished and provides a final score, the app records the final score and match outcome; common Over/Under and Both Teams to Score markets are settled automatically where possible. Unsupported/ambiguous markets are marked for manual review rather than guessed.
+## Что исправлено
+- Интервал LIVE API по умолчанию установлен на 15 секунд (минимум тоже 15 секунд), чтобы не подходить вплотную к лимиту API.
+- Расчёт рынков Match Odds / 1X2 теперь учитывает названия хозяев и гостей, сохранённые в событии, а также стандартные обозначения `Home/1`, `Away/2` и `Draw/X`.
+- Журнал прироста объёма строится по всей API-истории, а не только по текущим фильтрам интерфейса. CSV-импорт не создаёт новых LIVE-событий.
+- Рынки первого тайма не рассчитываются по финальному счёту; нераспознанные рынки остаются на ручную проверку.
 
-Important assumptions:
-- `volume` must be a cumulative amount in euros for a given runner.
-- Results are only journaled for newly collected LIVE API data; imported CSV history is not treated as newly observed signals.
-- Match settlement requires `live_info.finished` to become true-like and final goals to be present in the API response.
-- First-half markets and some 1X2 runner mappings need half-time data or explicit team/outcome mapping; they are marked for review when the available data is insufficient.
-- SQLite persistence depends on the hosting filesystem. If Streamlit Cloud restarts onto ephemeral storage, use an external persistent database for durable journaling.
+## Установка
+1. Распакуйте архив.
+2. Замените `app.py` в GitHub-репозитории этим файлом (или скопируйте исправления вручную).
+3. Проверьте, что `requirements.txt` содержит зависимости из архива.
+4. Сделайте commit и дождитесь перезапуска Streamlit Cloud.
+5. В Streamlit Secrets должен оставаться `BETWATCH_API_KEY`; сам ключ в код не вставляйте и никому не отправляйте.
 
-Install by replacing `app.py`, `requirements.txt`, and `README.md` in GitHub, committing, then rebooting the Streamlit app. Keep `BETWATCH_API_KEY` only in Streamlit Secrets.
+## Ограничения
+- Автоматический расчёт покрывает только явно распознанные рынки. Азиатские линии, точный счёт, форы, таймовые рынки и другие неоднозначные рынки требуют отдельной логики или ручной проверки.
+- Проверка выполнена на синтаксис Python. Для подтверждения поведения необходим тест с реальным ответом API и завершёнными матчами.
+- Локальная SQLite-база на Streamlit Cloud может не пережить пересоздание среды; для долговременного журнала используйте внешнюю постоянную БД.
